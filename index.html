@@ -436,6 +436,7 @@
 <div class="toast" id="toast"></div>
 
 <link href="https://fonts.googleapis.com/css2?family=Bodoni+Moda:wght@600;700;800;900&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.43.4/dist/umd/supabase.min.js"></script>
 
 <script>
 (function(){
@@ -510,14 +511,24 @@
   ];
   function tagObj(k){return TAGS.find(function(t){return t.key===k;})||{key:k,nome:k,cor:"#6B6B6B",fg:"#fff"};}
 
-  var db=null, userCap=null, canWrite=true;
+  /* ---------- Supabase config ---------- */
+  var SB_URL="https://prlfafeknikcdawmllma.supabase.co";
+  var SB_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBybGZhZmVrbmlrY2Rhd21sbG1hIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM4MTczNjUsImV4cCI6MjEwOTM5MzM2NX0.XXM3CHKbBih9isH4u5LDzAWLoch-boKDDz2yg0U4ves";
+  var sb=window.supabase?window.supabase.createClient(SB_URL,SB_KEY):null;
+
+  var canWrite=true;
   var clientes=[], demandas=[], tarefas=[];
   var view={name:"inicio"};
   var loaded={cli:false,dem:false};
   var focusTk=false;
   var currentUser={id:null,name:"",color:""};
-  var profileCache={},profilePending={};
   var boardSearch="", boardFilterPrio="", boardFilterResp="", boardSort="default";
+
+  /* ---------- field mapping camelCase ↔ snake_case ---------- */
+  function c2s(s){return s.replace(/[A-Z]/g,function(m){return "_"+m.toLowerCase();});}
+  function s2c(s){return s.replace(/_([a-z])/g,function(_,c){return c.toUpperCase();});}
+  function toSnake(o){var r={};for(var k in o){if(o.hasOwnProperty(k)&&k!=="id")r[c2s(k)]=o[k];}return r;}
+  function fromSnake(o){var r={};for(var k in o){if(o.hasOwnProperty(k))r[s2c(k)]=o[k];}return r;}
 
   function applyViewer(){
     var av=document.getElementById("viewer-av"),nm=document.getElementById("viewer-name");
@@ -527,18 +538,8 @@
     av.textContent=initials(label);
     if(currentUser.color){av.style.background=currentUser.color;av.style.color="#fff";}
   }
-  function ensureNames(ids){
-    if(!userCap||!userCap.profiles)return;
-    var need=[];
-    ids.forEach(function(id){if(id&&!profileCache[id]&&!profilePending[id])need.push(id);});
-    if(!need.length)return;
-    need.forEach(function(id){profilePending[id]=true;});
-    userCap.profiles(need).then(function(ps){
-      Object.keys(ps).forEach(function(id){profileCache[id]=ps[id];delete profilePending[id];});
-      render();
-    }).catch(function(){need.forEach(function(id){delete profilePending[id];});});
-  }
-  function nameOf(id){return (profileCache[id]&&profileCache[id].name)||"";}
+  function ensureNames(){}
+  function nameOf(){return "";}
 
   var main=document.getElementById("main");
   var modalRoot=document.getElementById("modal-root");
@@ -547,7 +548,8 @@
   function esc(s){s=(s==null?"":String(s));return s.replace(/[&<>"']/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];});}
   function initials(name){var p=(name||"").trim().split(/\s+/).filter(Boolean);if(!p.length)return "?";if(p.length===1)return p[0].slice(0,2).toUpperCase();return (p[0][0]+p[p.length-1][0]).toUpperCase();}
   function toast(msg){toastEl.textContent=msg;toastEl.classList.add("show");clearTimeout(toast._t);toast._t=setTimeout(function(){toastEl.classList.remove("show");},2200);}
-  function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
+  function uid(){try{return crypto.randomUUID();}catch(e){return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,function(c){var r=Math.random()*16|0;return (c==="x"?r:r&3|8).toString(16);});}}
+  function localId(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7);}
   function fmtPrazo(d){if(!d)return "";var parts=d.split("-");if(parts.length!==3)return d;return parts[2]+"/"+parts[1];}
   function isLate(d,status){if(!d||status==="publicado")return false;var t=new Date();t.setHours(0,0,0,0);return new Date(d+"T00:00:00")<t;}
   function isSoon(d,status){if(!d||status==="publicado"||isLate(d,status))return false;var t=new Date();t.setHours(0,0,0,0);var deadline=new Date(d+"T00:00:00");var diff=(deadline-t)/(1000*60*60*24);return diff>=0&&diff<=3;}
@@ -557,41 +559,61 @@
   function fmtTime(ts){if(!ts)return "";var d=new Date(ts);return d.toLocaleDateString("pt-BR",{day:"2-digit",month:"2-digit"})+" "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});}
   function colNome(key){var c=COLS.find(function(x){return x.key===key;});return c?c.nome:key;}
 
-  /* ---------- capability boot ---------- */
+  /* ---------- Supabase boot ---------- */
+  function initUser(){
+    try{var s=localStorage.getItem("p2a_user");if(s){currentUser=JSON.parse(s);applyViewer();return true;}}catch(e){}
+    return false;
+  }
+  function promptUserName(){
+    openModal('<div class="modal">'+
+      '<h2>Bem-vindo à Central P2A</h2>'+
+      '<div class="sub">Digite seu nome para identificar suas ações no time.</div>'+
+      '<div class="field"><label>Seu nome</label><input id="u-name" placeholder="Ex.: Priscila"></div>'+
+      '<div class="modal-actions"><button class="btn primary" id="u-save">Entrar</button></div>'+
+    '</div>');
+    var inp=document.getElementById("u-name"),btn=document.getElementById("u-save");
+    if(inp)inp.focus();
+    function doSave(){var n=(inp.value||"").trim();if(!n)return;currentUser={id:uid(),name:n,color:AVATARS[Math.floor(Math.random()*AVATARS.length)].bg};try{localStorage.setItem("p2a_user",JSON.stringify(currentUser));}catch(e){}applyViewer();closeModal();}
+    btn.onclick=doSave;
+    inp.onkeydown=function(e){if(e.key==="Enter")doSave();};
+  }
+
+  function fetchTable(table,cb){
+    if(!sb)return;
+    var q=sb.from(table).select("*");
+    if(table==="clientes")q=q.order("created_at",{ascending:true});
+    else if(table==="tarefas")q=q.order("created_at",{ascending:true});
+    else q=q.order("created_at",{ascending:true});
+    q.then(function(res){
+      if(res.error){console.error(table,res.error);return;}
+      cb((res.data||[]).map(fromSnake));
+    });
+  }
+  function fetchAll(){
+    fetchTable("clientes",function(d){clientes=d;loaded.cli=true;render();});
+    fetchTable("demandas",function(d){demandas=d;loaded.dem=true;render();});
+    fetchTable("tarefas",function(d){tarefas=d;render();});
+  }
+  function subscribeRealtime(){
+    if(!sb)return;
+    sb.channel("p2a-realtime")
+      .on("postgres_changes",{event:"*",schema:"public",table:"clientes"},function(){fetchTable("clientes",function(d){clientes=d;loaded.cli=true;render();});})
+      .on("postgres_changes",{event:"*",schema:"public",table:"demandas"},function(){fetchTable("demandas",function(d){demandas=d;loaded.dem=true;render();});})
+      .on("postgres_changes",{event:"*",schema:"public",table:"tarefas"},function(){fetchTable("tarefas",function(d){tarefas=d;render();});})
+      .subscribe();
+  }
+
   (function boot(){
-    if(!(window.claude&&window.claude.use)){canWrite=true;render();return;}
     render();
-    window.claude.use("user").then(function(u){
-      userCap=u;
-      if(!u)return;
-      if(u.me){u.me().then(function(m){
-        currentUser={id:m.id,name:m.name||"",color:m.color||""};
-        if(m.id)profileCache[m.id]={name:m.name||"",avatarUrl:m.avatarUrl,color:m.color};
-        applyViewer();
-      }).catch(function(){});}
-      if(u.can){try{Promise.resolve(u.can("data.write")).then(function(w){if(w===false){canWrite=false;render();}}).catch(function(){});}catch(e){}}
-    }).catch(function(){});
-    window.claude.use("db").then(function(d){
-      if(!d){render();return;}
-      db=d;
-      db.collection("clientes").orderBy("createdAt").onSnapshot(function(snap){
-        clientes=snap.docs.map(function(doc){var o=doc.data()||{};o.id=doc.id;return o;});
-        loaded.cli=true;render();
-      },function(e){loaded.cli=true;render();});
-      db.collection("demandas").onSnapshot(function(snap){
-        demandas=snap.docs.map(function(doc){var o=doc.data()||{};o.id=doc.id;return o;});
-        loaded.dem=true;render();
-      },function(e){loaded.dem=true;render();});
-      db.collection("tarefas").onSnapshot(function(snap){
-        tarefas=snap.docs.map(function(doc){var o=doc.data()||{};o.id=doc.id;return o;});
-        render();
-      },function(e){});
-    }).catch(function(){render();});
+    if(!sb){canWrite=true;loaded.cli=true;loaded.dem=true;render();return;}
+    if(!initUser()){setTimeout(function(){if(!currentUser.id)promptUserName();},400);}
+    fetchAll();
+    subscribeRealtime();
   })();
 
   /* ---------- writes ---------- */
-  function needDb(){if(!db){toast("Conectando ao banco… tente em instantes.");return false;}if(!canWrite){toast("Você está em modo somente leitura.");return false;}return true;}
-  function wErr(e){if(e&&e.code==="invalid_argument"){canWrite=false;render();toast("Sem permissão de edição neste link.");}else{toast("Não consegui salvar. Tente de novo.");}}
+  function needDb(){if(!sb){toast("Conectando ao banco… tente em instantes.");return false;}if(!canWrite){toast("Você está em modo somente leitura.");return false;}return true;}
+  function wErr(e){console.error("DB error:",e);toast("Não consegui salvar. Tente de novo.");}
   function idxOf(arr,id){for(var i=0;i<arr.length;i++){if(arr[i].id===id)return i;}return -1;}
 
   function saveCliente(data,id){
@@ -600,23 +622,24 @@
       var i=idxOf(clientes,id);
       if(i>=0)clientes[i]=Object.assign({},clientes[i],data);
       render();
-      db.doc("clientes/"+id).update(data).then(function(){toast("Cliente atualizado ✓");}).catch(wErr);
+      sb.from("clientes").update(toSnake(data)).eq("id",id).then(function(res){if(res.error)wErr(res.error);else toast("Cliente atualizado ✓");});
     }else{
-      var nid=uid();data.createdAt=Date.now();
+      var nid=uid();data.createdAt=new Date().toISOString();
       clientes=clientes.concat([Object.assign({id:nid},data)]);
       render();
-      db.doc("clientes/"+nid).set(data).then(function(){toast("Cliente criado ✓");}).catch(function(e){
-        clientes=clientes.filter(function(x){return x.id!==nid;});render();wErr(e);
+      var row=toSnake(data);row.id=nid;
+      sb.from("clientes").insert(row).then(function(res){
+        if(res.error){clientes=clientes.filter(function(x){return x.id!==nid;});render();wErr(res.error);}
+        else toast("Cliente criado ✓");
       });
     }
   }
   function deleteCliente(id){
     if(!needDb())return;
-    demOfAll(id).forEach(function(d){db.doc("demandas/"+d.id).delete().catch(function(){});});
     demandas=demandas.filter(function(x){return x.clienteId!==id;});
     clientes=clientes.filter(function(x){return x.id!==id;});
     view={name:"grid"};render();
-    db.doc("clientes/"+id).delete().then(function(){toast("Cliente excluído");}).catch(wErr);
+    sb.from("clientes").delete().eq("id",id).then(function(res){if(res.error)wErr(res.error);else toast("Cliente excluído");});
   }
   function saveDemanda(data,id){
     if(!needDb())return;
@@ -624,25 +647,28 @@
       var i=idxOf(demandas,id);
       if(i>=0)demandas[i]=Object.assign({},demandas[i],data);
       render();
-      db.doc("demandas/"+id).update(data).then(function(){toast("Demanda atualizada ✓");}).catch(wErr);
+      sb.from("demandas").update(toSnake(data)).eq("id",id).then(function(res){if(res.error)wErr(res.error);else toast("Demanda atualizada ✓");});
     }else{
-      var nid=uid();data.createdAt=Date.now();
+      var nid=uid();data.createdAt=new Date().toISOString();
       if(currentUser.id)data.criadoPorId=currentUser.id;
+      if(currentUser.name)data.criadoPorNome=currentUser.name;
       if(!data.subtarefas)data.subtarefas=[];
       if(!data.comentarios)data.comentarios=[];
       if(!data.log)data.log=[];
       if(!data.tags)data.tags=[];
       demandas=demandas.concat([Object.assign({id:nid},data)]);
       render();
-      db.doc("demandas/"+nid).set(data).then(function(){toast("Demanda adicionada ✓");}).catch(function(e){
-        demandas=demandas.filter(function(x){return x.id!==nid;});render();wErr(e);
+      var row=toSnake(data);row.id=nid;
+      sb.from("demandas").insert(row).then(function(res){
+        if(res.error){demandas=demandas.filter(function(x){return x.id!==nid;});render();wErr(res.error);}
+        else toast("Demanda adicionada ✓");
       });
     }
   }
   function deleteDemanda(id){
     if(!needDb())return;
     demandas=demandas.filter(function(x){return x.id!==id;});render();
-    db.doc("demandas/"+id).delete().catch(wErr);
+    sb.from("demandas").delete().eq("id",id).then(function(res){if(res.error)wErr(res.error);});
   }
   function archiveDemanda(id){
     if(!needDb())return;
@@ -650,7 +676,7 @@
     var logEntry={acao:"arquivou",de:colNome(demandas[i].status),para:"Arquivo",nome:currentUser.name||"Alguém",ts:Date.now()};
     var newLog=(demandas[i].log||[]).concat([logEntry]);
     demandas[i]=Object.assign({},demandas[i],{arquivada:true,log:newLog});render();
-    db.doc("demandas/"+id).update({arquivada:true,log:newLog}).then(function(){toast("Demanda arquivada ✓");}).catch(wErr);
+    sb.from("demandas").update({arquivada:true,log:newLog}).eq("id",id).then(function(res){if(res.error)wErr(res.error);else toast("Demanda arquivada ✓");});
   }
   function restoreDemanda(id){
     if(!needDb())return;
@@ -658,7 +684,7 @@
     var logEntry={acao:"restaurou",de:"Arquivo",para:colNome(demandas[i].status),nome:currentUser.name||"Alguém",ts:Date.now()};
     var newLog=(demandas[i].log||[]).concat([logEntry]);
     demandas[i]=Object.assign({},demandas[i],{arquivada:false,log:newLog});render();
-    db.doc("demandas/"+id).update({arquivada:false,log:newLog}).then(function(){toast("Demanda restaurada ✓");}).catch(wErr);
+    sb.from("demandas").update({arquivada:false,log:newLog}).eq("id",id).then(function(res){if(res.error)wErr(res.error);else toast("Demanda restaurada ✓");});
   }
   function duplicateDemanda(id){
     if(!needDb())return;
@@ -676,15 +702,15 @@
     var logEntry={acao:"moveu",de:colNome(oldStatus),para:colNome(status),nome:currentUser.name||"Alguém",ts:Date.now()};
     var newLog=(d.log||[]).concat([logEntry]);
     d.status=status;d.log=newLog;render();
-    db.doc("demandas/"+id).update({status:status,log:newLog}).catch(wErr);
+    sb.from("demandas").update({status:status,log:newLog}).eq("id",id).then(function(res){if(res.error)wErr(res.error);});
   }
   function addSubtarefa(demId,texto){
     if(!needDb())return;
     texto=(texto||"").trim();if(!texto)return;
     var d=demandas.find(function(x){return x.id===demId;});if(!d)return;
-    var st=(d.subtarefas||[]).concat([{id:uid(),texto:texto,feita:false}]);
+    var st=(d.subtarefas||[]).concat([{id:localId(),texto:texto,feita:false}]);
     d.subtarefas=st;
-    db.doc("demandas/"+demId).update({subtarefas:st}).catch(wErr);
+    sb.from("demandas").update({subtarefas:st}).eq("id",demId).then(function(res){if(res.error)wErr(res.error);});
     renderDemDetail(d);
   }
   function toggleSubtarefa(demId,stId){
@@ -692,7 +718,7 @@
     var d=demandas.find(function(x){return x.id===demId;});if(!d)return;
     var st=(d.subtarefas||[]).map(function(s){return s.id===stId?Object.assign({},s,{feita:!s.feita}):s;});
     d.subtarefas=st;
-    db.doc("demandas/"+demId).update({subtarefas:st}).catch(wErr);
+    sb.from("demandas").update({subtarefas:st}).eq("id",demId).then(function(res){if(res.error)wErr(res.error);});
     renderDemDetail(d);
   }
   function delSubtarefa(demId,stId){
@@ -700,17 +726,17 @@
     var d=demandas.find(function(x){return x.id===demId;});if(!d)return;
     var st=(d.subtarefas||[]).filter(function(s){return s.id!==stId;});
     d.subtarefas=st;
-    db.doc("demandas/"+demId).update({subtarefas:st}).catch(wErr);
+    sb.from("demandas").update({subtarefas:st}).eq("id",demId).then(function(res){if(res.error)wErr(res.error);});
     renderDemDetail(d);
   }
   function addComentario(demId,texto){
     if(!needDb())return;
     texto=(texto||"").trim();if(!texto)return;
     var d=demandas.find(function(x){return x.id===demId;});if(!d)return;
-    var cmt={id:uid(),texto:texto,autorNome:currentUser.name||"Anônimo",autorId:currentUser.id||"",ts:Date.now()};
+    var cmt={id:localId(),texto:texto,autorNome:currentUser.name||"Anônimo",autorId:currentUser.id||"",ts:Date.now()};
     var arr=(d.comentarios||[]).concat([cmt]);
     d.comentarios=arr;
-    db.doc("demandas/"+demId).update({comentarios:arr}).catch(wErr);
+    sb.from("demandas").update({comentarios:arr}).eq("id",demId).then(function(res){if(res.error)wErr(res.error);});
     renderDemDetail(d);
   }
   function saveTarefa(data,id){
@@ -718,26 +744,27 @@
     var editing=!!id;
     if(!editing){
       id=uid();
-      data.feita=false;data.createdAt=Date.now();
+      data.feita=false;data.createdAt=new Date().toISOString();
       if(currentUser.id){data.criadoPorId=currentUser.id;data.criadoPorNome=currentUser.name;}
       tarefas=tarefas.concat([Object.assign({id:id},data)]);focusTk=true;render();
-      db.doc("tarefas/"+id).set(data).catch(function(e){tarefas=tarefas.filter(function(x){return x.id!==id;});render();wErr(e);});
+      var row=toSnake(data);row.id=id;
+      sb.from("tarefas").insert(row).then(function(res){if(res.error){tarefas=tarefas.filter(function(x){return x.id!==id;});render();wErr(res.error);}});
     }else{
       var i=idxOf(tarefas,id);if(i>=0)tarefas[i]=Object.assign({},tarefas[i],data);
       render();
-      db.doc("tarefas/"+id).update(data).catch(wErr);
+      sb.from("tarefas").update(toSnake(data)).eq("id",id).then(function(res){if(res.error)wErr(res.error);});
     }
   }
   function toggleTarefa(id){
     if(!needDb())return;
     var i=idxOf(tarefas,id);if(i<0)return;
     var nv=!tarefas[i].feita;tarefas[i]=Object.assign({},tarefas[i],{feita:nv});render();
-    db.doc("tarefas/"+id).update({feita:nv}).catch(wErr);
+    sb.from("tarefas").update({feita:nv}).eq("id",id).then(function(res){if(res.error)wErr(res.error);});
   }
   function deleteTarefa(id){
     if(!needDb())return;
     tarefas=tarefas.filter(function(x){return x.id!==id;});render();
-    db.doc("tarefas/"+id).delete().catch(wErr);
+    sb.from("tarefas").delete().eq("id",id).then(function(res){if(res.error)wErr(res.error);});
   }
   function tarefaModal(t,defaultPrio){
     var editing=!!t;t=t||{};
@@ -788,11 +815,11 @@
   }
 
   function connBadge(){
-    if(window.claude&&window.claude.use){
-      if(!db)return '<div class="status-line"><span class="dot-live" style="background:#E4A11B"></span> Conectando ao banco compartilhado…</div>';
+    if(sb){
+      if(!loaded.cli)return '<div class="status-line"><span class="dot-live" style="background:#E4A11B"></span> Conectando ao banco compartilhado…</div>';
       return '<div class="status-line"><span class="dot-live"></span> Dados compartilhados e salvos em tempo real'+(canWrite?"":' · somente leitura')+'</div>';
     }
-    return '<div class="status-line"><span class="dot-live" style="background:#E4A11B"></span> Prévia local — publique para salvar e compartilhar com o time</div>';
+    return '<div class="status-line"><span class="dot-live" style="background:#E4A11B"></span> Banco de dados indisponível</div>';
   }
 
   function tile(v,k,cls){return '<div class="kpi"><div class="v '+(cls||"")+'">'+v+'</div><div class="k">'+esc(k)+'</div></div>';}
@@ -990,7 +1017,7 @@
         var i=idxOf(tarefas,tkDragId);if(i<0)return;
         tarefas[i]=Object.assign({},tarefas[i],{prioridade:newPrio});
         render();
-        db.doc("tarefas/"+tkDragId).update({prioridade:newPrio}).catch(wErr);
+        sb.from("tarefas").update({prioridade:newPrio}).eq("id",tkDragId).then(function(res){if(res.error)wErr(res.error);});
       });
     });
   }
@@ -1080,7 +1107,7 @@
       '</button>';
     });
     cards+='<button class="card add" data-action="add-cli"><span class="plus">+</span><b>Adicionar cliente</b><span class="cli-sub">Um card por cliente</span></button>';
-    var loading=(window.claude&&window.claude.use&&!loaded.cli&&db);
+    var loading=(sb&&!loaded.cli);
     main.innerHTML=
       '<div class="head">'+
         '<span class="eyebrow">P2A · Central de clientes</span>'+
